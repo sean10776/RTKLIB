@@ -1192,6 +1192,8 @@ typedef struct {        /* satellite status type */
     double phw;         /* phase windup (cycle) */
     gtime_t pt[2][NFREQ]; /* previous carrier-phase time */
     double  ph[2][NFREQ]; /* previous carrier-phase observable (cycle) */
+    double TEC;         /* total electron content: TEC */
+    uint8_t hfilter;    /* hatch filter for TEC */
 } ssat_t;
 
 typedef struct {        /* ambiguity control type */

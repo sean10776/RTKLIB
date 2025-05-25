@@ -311,12 +311,12 @@ extern int rtkoutstat(rtk_t *rtk, int level, char *buff)
         satno2id(i+1,id);
         for (int j=0;j<nfreq;j++) {
             int k=IB(i+1,j,&rtk->opt);
-            p+=sprintf(p,"$SAT,%d,%.3f,%s,%d,%.1f,%.1f,%.4f,%.4f,%d,%.0f,%d,%d,%d,%u,%u,%u,%.2f,%.6f,%.5f\n",
+            p+=sprintf(p,"$SAT,%d,%.3f,%s,%d,%.1f,%.1f,%.4f,%.4f,%d,%.0f,%d,%d,%d,%u,%u,%u,%.2f,%.6f,%.5f,%.5f,%d\n",
                        week,tow,id,j+1,ssat->azel[0]*R2D,ssat->azel[1]*R2D,
                        ssat->resp[j],ssat->resc[j],ssat->vsat[j],ssat->snr_rover[j]*SNR_UNIT,
                        ssat->fix[j],ssat->slip[j]&(LLI_SLIP|LLI_HALFC),ssat->lock[j],ssat->outc[j],
                        ssat->slipc[j],ssat->rejc[j],k<rtk->nx?rtk->x[k]:0,
-                       k<rtk->nx?rtk->P[k+k*rtk->nx]:0,ssat->icbias[j]);
+                       k<rtk->nx?rtk->P[k+k*rtk->nx]:0,ssat->icbias[j],ssat->TEC,ssat->hfilter);
         }
     }
 
@@ -1958,6 +1958,62 @@ static int valpos(rtk_t *rtk, const double *v, const double *R, const int *vflg,
     }
     return stat;
 }
+/* meaiontec() Caculate ion TEC value with two or more frequency -------------------------
+ *  args:  rtk      IO      gps solution structure
+           obs      I       satellite observations
+           nu       I       # of user observations (rover)
+ */
+static void meaiontec(rtk_t *rtk, const obsd_t *obs, int nu)
+{
+    const double fact=40.30E16; /* constant for TEC calculation */
+    prcopt_t *opt=&rtk->opt;
+    int i,j,nf=opt->nf,sat,valid_f,filter=0;
+    double FREQ1,FREQ2,TEC,freq[NFREQ],y[NFREQ],x[2];
+    /* skip if no enough frequencies */
+    if (nf<2) return;
+
+    for(i=0;i<nu;i++)
+    {
+        valid_f=0;
+        sat=obs[i].sat-1;
+        filter=rtk->ssat[sat].hfilter;
+        for(j=0;j<nf;j++)
+        {
+            if(obs[i].P[j]==0.0) continue;
+            if(testsnr(0,j,rtk->ssat[sat].azel[1],obs->SNR[j]*SNR_UNIT,&opt->snrmask)) continue;
+            if((freq[valid_f]=sat2freq(obs[i].sat,obs[i].code[j],NULL))==0.0) continue;
+            y[valid_f++]=obs[i].P[j];
+        }
+        /* skip if no enough frequencies */
+        if(valid_f<2) {
+            trace(3,"meaiontec: not enough frequencies (%d)\n",valid_f);
+            rtk->ssat[sat].TEC=0.0; /* reset TEC */
+            rtk->ssat[sat].hfilter=0; /* reset filter */
+            continue; 
+        }
+
+        /* create lsq parameter */
+        double *_y=mat(valid_f,1),*H=mat(2,valid_f),*Q=mat(2,2);
+        for(j=0;j<valid_f;j++) {
+            _y[j]=y[j];
+            H[0+2*j]=1; /* H = 1 */
+            H[1+2*j]=fact/freq[j]/freq[j]; /* H = fact/F^2 */
+        }
+
+        if (lsq(H,_y,2,valid_f,x,Q)) {
+            printf("meaiontec: lsq error\n");
+            free(_y); free(H); free(Q);
+            continue;
+        }
+        
+        /* add hatch filter for TEC  */
+        if (filter < 60) filter++;
+        rtk->ssat[sat].TEC=x[1]/filter+(filter-1)*rtk->ssat[sat].TEC/filter;
+        rtk->ssat[sat].hfilter=filter;
+
+        free(_y); free(H); free(Q);
+    }
+}
 /* relpos()relative positioning ------------------------------------------------------
  *  args:  rtk      IO      gps solution structure
            obs      I       satellite observations
@@ -2382,6 +2438,7 @@ extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
 
     /* single point positioning */
     if (opt->mode==PMODE_SINGLE) {
+        meaiontec(rtk,obs,nu);
         outsolstat(rtk,nav);
         return 1;
     }
@@ -2392,6 +2449,7 @@ extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
     /* precise point positioning */
     if (opt->mode>=PMODE_PPP_KINEMA) {
         pppos(rtk,obs,nu,nav);
+        meaiontec(rtk,obs,nu);
         outsolstat(rtk,nav);
         return 1;
     }
@@ -2438,6 +2496,7 @@ extern int rtkpos(rtk_t *rtk, const obsd_t *obs, int n, const nav_t *nav)
     /* Relative positioning */
     relpos(rtk,obs,nu,nr,nav);
     rtk->epoch++;
+    meaiontec(rtk,obs,nu);
     outsolstat(rtk,nav);
 
     return 1;
